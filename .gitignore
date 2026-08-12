@@ -2,7 +2,6 @@
 .env
 database/.env
 *.env
-.streamlit/secrets.toml
 
 # Python
 __pycache__/
