@@ -4,6 +4,29 @@
 demand forecasting, real-time crowd analytics, climate assessment, and
 personalized recommendations into one budget-aware trip planner for
 Telangana.*
+             USER
+               │
+               ▼
+       🖥️ STREAMLIT
+          frontend/app.py
+               │
+               │ HTTP
+               ▼
+       ⚡ FASTAPI BACKEND
+          backend/main.py
+               │
+        ┌──────┴──────┐
+        ▼             ▼
+   🤖 ML MODELS    🗄️ SUPABASE
+   .pkl / .pt      PostgreSQL
+        │             │
+        │       ┌─────┼──────────┐
+        │       ▼     ▼          ▼
+        │    Crowd Climate     Cost
+        │    Spots  Weather    Budget
+        │
+        ▼
+   🎯 Predictions
 
 ### What it does
 
@@ -82,7 +105,7 @@ every endpoint directly.
 cd App/frontend
 streamlit run app.py
 ```
-Runs at `http://127.0.0.1:8501`. The backend must already be running — the
+Runs at `http://127.0.0.1:6501`. The backend must already be running — the
 frontend shows a clear error with the exact command to run if it isn't.
 
 ---
