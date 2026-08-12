@@ -21,3 +21,12 @@ App/predictions_log.csv
 Thumbs.db
 .vscode/
 .idea/
+
+# Large / Unnecessary Folders & Files
+Notebooks/
+Others/
+*.pdf
+
+# Security Keys & Credentials
+*.pem
+*.key
