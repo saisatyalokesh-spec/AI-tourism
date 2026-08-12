@@ -1,0 +1,24 @@
+
+.env
+App/ml1.env
+App/backend/database/.env
+App/frontend/.streamlit/secrets.toml
+*.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Logs — regenerated on every run, not something to diff/merge in git.
+App/predictions_log.txt
+App/predictions_log.csv
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

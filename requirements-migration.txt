@@ -1,0 +1,8 @@
+# Dependencies for migrate_to_supabase.py (a one-off script, not part of
+# the running app — the app's own requirements are in App/backend and
+# App/frontend). Install with:
+#     pip install -r requirements-migration.txt
+pandas
+python-dotenv
+sqlalchemy
+psycopg2-binary
