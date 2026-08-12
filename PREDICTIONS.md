@@ -1,75 +1,133 @@
-# What This App Predicts, and How
+# 🧠 What This App Predicts, and How
 
-## 1. Cost Estimation
-**Model:** `pickles/best_trip_cost_model.pkl` — a `MultiOutputRegressor` wrapping
-5 XGBoost regressors, trained in `eda_trip_budget_prediction.ipynb`.
+## 1. 💸 Cost Estimation
 
-**Inputs:** duration (days), number of travelers, route distance (km),
-transport mode, accommodation tier, season.
+**Model:** 5 XGBoost models working together (`pickles/best_trip_cost_model.pkl`), trained in `eda_trip_budget_prediction.ipynb`.
 
-**Data it was trained on:** `data/trip_budget_prediction_dataset.csv`.
+**In simple terms:** Give it your trip length, group size, distance,
+transport mode, and hotel tier — it estimates what you'll spend, split
+into 5 parts: stay, food, travel, entry tickets, and tolls/parking.
 
-**Output:** five cost components — travel, stay, food, entry fees, tolls &
-parking — summed into a total estimated cost.
+**Trained on:** real past trip data — the `trip_budget_prediction` table.
 
-## 2. Crowd / Footfall Prediction
-**Model:** `pickles/best_model.pkl` — an XGBoost regressor, trained in
-`Crowd_predication.ipynb`.
+**Good to know:** Travel cost isn't a guess from the model — it's worked
+out with a real fuel-price/fare formula instead, so it stays accurate even
+as prices change.
 
-**Inputs:** spot name, district, category, year, month, season, festival.
+**Output:** 5 cost components, added up into one total estimated cost.
 
-**Data it was trained on:** `data/spot_visitors.csv`.
+**🔀 Flow:**
+```
+📝 Days · Travelers · Distance · Transport · Hotel Tier
+        │
+        ▼
+🤖 5 XGBoost models predict together
+        │
+        ▼
+🏨 Stay  🍽️ Food  🎫 Tickets  🅿️ Tolls    ⛽ Travel
+   (from the models)                 (from a real fuel-price formula)
+        │
+        ▼
+💸 Total Estimated Cost
+```
 
-**Output:** predicted visitor count for that spot in that month, bucketed
-into a Quiet / Moderate / Busy / Very Crowded label.
+---
 
-**Note:** the trained model leans much more on *which spot* than *which
-month* — confirmed in the notebook's own correlation analysis — so
-predictions for the same spot across different months may look similar.
+## 2. 👥 Crowd Prediction
 
-## 3. Climate Forecast
-**Model:** `pickles/best_climate_lstm_model.pt` + `best_climate_metadata.pkl`
-— a 1-layer PyTorch LSTM, trained in `Climate_Forecast_EDA.ipynb`.
+**Model:** XGBoost (`pickles/best_model.pkl`), trained in `Crowd_predication.ipynb`.
 
-**How it actually works (this matters):** the model was trained on the
-*day-to-day change* (`.diff()`) in the statewide daily average of
-`Temperature_Max_C`, `Temperature_Min_C`, and a derived `Rainfall_Percent`
-(a rolling 7-day % of rain-days per district, rain day = ≥1mm rainfall). To
-forecast a future date, the backend:
+**In simple terms:** Give it a spot, district, category, and date — it
+predicts roughly how many people will visit, then labels it 🟢 Quiet,
+🟡 Moderate, 🟠 Busy, or 🔴 Very Crowded.
 
-1. Rebuilds that statewide daily series from `data/Climate_Dataset_Final.csv`.
-2. Takes the last 7 days of it and feeds them through the LSTM, one day at a
-   time, feeding each prediction back in as the next input (autoregressive).
-3. Adds up all the predicted daily changes between the dataset's last known
-   date and your travel date.
-4. Adds that cumulative change to the chosen district's last known actual
-   reading, to get the final forecast.
+**Trained on:** real historical visitor counts — the `spot_visitors` table.
 
-This is a genuine forward prediction, not a lookup of the closest historical
-row — it works for any future date, not just ones near existing data.
+**Good to know:** The model is much better at telling *which spot* is
+popular than *which month* is busy (confirmed in the training notebook's
+own analysis). So one extra rule sits on top: 🟠 **Busy** and 🔴 **Very
+Crowded** only ever appear when your travel date genuinely falls inside a
+real festival window. Otherwise it stays at Moderate — even for a very
+popular spot — so an ordinary Tuesday can't get mislabeled as
+festival-level crowds. See `_festival_is_active()` in `backend/predict.py`.
 
-**Seasonal blend:** the day-to-day diff walk above has no notion of season —
-left alone, it just drifts roughly linearly away from whatever the dataset's
-last known date looked like (e.g. always trending "rainy" if the dataset
-happens to end during monsoon). Past `CLIMATE_BLEND_HORIZON_DAYS` (14 days,
-see `backend/predict.py`), the forecast is blended toward that district's
-historical average for the target date's calendar month, computed from every
-year in `data/Climate_Dataset_Final.csv`. Nearer-term forecasts (within 14
-days of the dataset's last date) still trust the LSTM's own walk.
+**🔀 Flow:**
+```
+📝 Spot · District · Category · Date
+        │
+        ▼
+🤖 XGBoost predicts a visitor count
+        │
+        ▼
+🎉 Does the date fall inside a real festival?
+   ├── ✅ Yes → 🟠 Busy or 🔴 Very Crowded allowed
+   └── ❌ No  → capped at 🟡 Moderate
+        │
+        ▼
+🟢🟡🟠🔴 Final Crowd Level
+```
 
-**Output:** predicted max temp, predicted min temp, rain chance (%).
+---
 
-## 4. Amenities
-**Not a trained model** — a direct lookup. Looks for an `Amenities` column
-on `data/spot_visitors.csv` (comma-separated values per spot). If that
-column doesn't exist yet, the app shows "not available" rather than
-guessing — add the column to enable this.
+## 3. 🌦️ Weather Forecast
 
-## Where each prediction gets logged
+**Model:** an LSTM — a model built for predicting sequences (`pickles/best_climate_lstm_model.pt`), trained in `Climate_Forecast_EDA.ipynb`.
 
-Every time you hit "Generate Predictions," the backend logs the full
-request (district, spot, trip details) and the full result (cost, crowd,
-climate) with a timestamp to `predictions_log.txt` in the project root —
-always, with zero setup. If you've configured Supabase (see
-`backend/database/.env.example`), the same record is also inserted into a
-`trip_predictions` table there.
+**In simple terms:** It learned how weather *changes* day to day, not just
+what's typical. To forecast your travel date, it looks at the last several
+days of real weather, predicts tomorrow, then feeds that guess back in to
+predict the day after — walking forward one day at a time until it
+reaches your travel date.
+
+That makes it a genuine forward forecast — it works for any future date,
+not just a lookup of "what usually happens this time of year."
+
+**🔀 Flow:**
+```
+📈 Last several days of real weather
+        │
+        ▼
+🔁 LSTM predicts Day 1's change  ──┐
+        │                          │ (feeds back in)
+        ▼                          │
+🔁 LSTM predicts Day 2's change  ◄─┘
+        │
+       ... repeats until your travel date ...
+        │
+        ▼
+➕ Add up every predicted daily change
+        │
+        ▼
+🌡️ Final forecast for your travel date
+
+        More than 14 days away?
+        │
+        ▼
+🔀 Blend in that month's usual weather pattern too
+```
+
+**One smart adjustment:** walking forward day-by-day alone can drift off
+track for dates far in the future (e.g. it might just keep trending
+"rainy" if the data happens to end during monsoon). So for trips more than
+`CLIMATE_BLEND_HORIZON_DAYS` (14) days away, the forecast blends in that
+month's usual historical weather pattern too — nearer-term forecasts still
+trust the day-by-day walk on its own.
+
+**Output:** predicted high temp, predicted low temp, chance of rain.
+
+---
+
+## 4. 🔔 Amenities
+
+**Not an AI model** — a simple, honest lookup. Every spot has its nearby
+restaurants, ATMs, and hospitals stored directly in the `amenities` table
+(see `get_amenities()` in `backend/predict.py`). If a spot doesn't have
+this info yet, the app says "not available" instead of guessing.
+
+---
+
+## 📝 Where predictions get saved
+
+Every time you hit "Generate Predictions," the app saves your full
+request and the full result — cost, crowd, and climate — with a timestamp
+to `App/predictions_log.txt`. Automatic, no setup needed.
