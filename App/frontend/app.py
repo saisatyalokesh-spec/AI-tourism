@@ -19,7 +19,7 @@ import requests
 import streamlit as st
 from streamlit_folium import st_folium
 
-BACKEND_URL = " http://127.0.0.1:49424/predict"
+BACKEND_URL = "http://0.0.0.0:10000/predict"
 
 # Nominatim (OpenStreetMap's free geocoder) and OSRM's public demo routing
 # server — both free, no API key required. Nominatim's usage policy requires
