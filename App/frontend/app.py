@@ -19,7 +19,7 @@ import requests
 import streamlit as st
 from streamlit_folium import st_folium
 
-"BACKEND_URL = "https://ai-tourism-ehym.onrender.com"
+BACKEND_URL = "https://127.0.0.1:38126"
 # Nominatim (OpenStreetMap's free geocoder) and OSRM's public demo routing
 # server — both free, no API key required. Nominatim's usage policy requires
 # a real identifying User-Agent on every request (unlabeled traffic gets
