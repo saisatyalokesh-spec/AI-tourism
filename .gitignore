@@ -1,9 +1,8 @@
 
 .env
-App/ml1.env
-App/backend/database/.env
-App/frontend/.streamlit/secrets.toml
+database/.env
 *.env
+.streamlit/secrets.toml
 
 # Python
 __pycache__/

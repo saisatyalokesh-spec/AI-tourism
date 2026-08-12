@@ -23,7 +23,7 @@ from typing import Any, Dict
 
 from database.config import SUPABASE_KEY, SUPABASE_URL
 
-LOG_PATH = Path(__file__).resolve().parent.parent.parent / "predictions_log.txt"
+LOG_PATH = Path(__file__).resolve().parent.parent / "App" / "predictions_log.txt"
 
 _supabase_client = None
 if SUPABASE_URL and SUPABASE_KEY:

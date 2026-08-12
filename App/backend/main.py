@@ -27,6 +27,24 @@ predict.log_interaction() — a no-op if SUPABASE_DB_URL isn't set.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+# uvicorn's --reload runs the actual server in a separate subprocess. On
+# Windows, that subprocess is a fresh interpreter (multiprocessing's
+# "spawn" method) that does NOT inherit this process's sys.path — so
+# without this, the imports below can fail with "ModuleNotFoundError" even
+# though the exact same command works fine without --reload.
+#
+# Two directories need to be on the path, not just one: `predict` and
+# `schemas` are siblings of this file (App/backend/), but `database` lives
+# at the project root, two levels up — confirmed against this repo's git
+# history, `database/` has never been nested inside App/backend/.
+_BACKEND_DIR = Path(__file__).resolve().parent          # .../App/backend
+_PROJECT_ROOT = _BACKEND_DIR.parent.parent               # .../Tourism Project
+sys.path.insert(0, str(_BACKEND_DIR))
+sys.path.insert(0, str(_PROJECT_ROOT))
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
