@@ -304,24 +304,48 @@ def get_db_connection():
     """Connection to the project database.
 
     Returns a SQLAlchemy connection to Supabase Postgres when SUPABASE_DB_URL
-    is set (see Tourism Project/.env); otherwise falls back to a read-only
-    connection to the local App/data/smart_tourism.db SQLite file. Both
-    support the same `with get_db_connection() as conn:` / pd.read_sql_query
-    usage used throughout this module.
+    is set (see Tourism Project/.env) AND that connection actually works;
+    otherwise falls back to a read-only connection to the local
+    App/data/smart_tourism.db SQLite file. Both support the same
+    `with get_db_connection() as conn:` / pd.read_sql_query usage used
+    throughout this module.
+
+    A broken or unreachable SUPABASE_DB_URL (wrong host, paused project,
+    bad password, no network egress to Supabase from wherever this is
+    deployed, etc.) no longer takes the whole app down — it falls back to
+    SQLite the same as if SUPABASE_DB_URL had never been set, and prints
+    one line explaining why so it's still visible in the logs.
     """
-    if _engine is not None:
+    if _engine is not None and _supabase_reachable():
         return _engine.connect()
     uri = f"file:{DB_PATH.as_posix()}?mode=ro"
     return sqlite3.connect(uri, uri=True, check_same_thread=False)
 
 
+@lru_cache(maxsize=1)
+def _supabase_reachable() -> bool:
+    """Tests the Supabase connection exactly once per process and caches
+    the result — so a broken SUPABASE_DB_URL doesn't re-attempt (and
+    re-wait on) a slow DNS/connect failure on every single query; every
+    call after the first failure falls back to SQLite immediately. Only
+    reached when _engine is not None (SUPABASE_DB_URL was set)."""
+    try:
+        with _engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True
+    except Exception as e:
+        print(f"[predict] Supabase unreachable, falling back to local SQLite for this session: {e}")
+        return False
+
+
 def log_interaction(spot_name: str, action_type: str) -> None:
     """Records one row in Supabase's user_interactions table (spot_name,
-    action_type, timestamp). Only active when SUPABASE_DB_URL is set — a
-    no-op against the local SQLite fallback, since that table only exists
-    in Supabase (created by migrate_to_supabase.py). Never raises: a
-    logging failure should never break the request that triggered it."""
-    if _engine is None:
+    action_type, timestamp). Only active when SUPABASE_DB_URL is set AND
+    reachable — a no-op against the local SQLite fallback, since that
+    table only exists in Supabase (created by migrate_to_supabase.py).
+    Never raises: a logging failure should never break the request that
+    triggered it."""
+    if _engine is None or not _supabase_reachable():
         return
     try:
         with _engine.begin() as conn:
