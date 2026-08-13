@@ -1883,7 +1883,8 @@ if len(selected_spots) >= 2:
 # eagerly here so the map stats and Smart Insights strip update as the
 # person adjusts inputs, without waiting for the full multi-page flow.
 preview_cost = None
-try:
+# ML previews are intentionally deferred until Generate My Trip Plan is clicked.
+if False:
     preview_cost = api_post("/predict/cost", {
         "duration_days": duration_days, "num_travelers": num_travelers,
         "route_distance_km": effective_route_distance_km, "transport_mode": transport_mode,
@@ -1892,22 +1893,22 @@ try:
         # blind entry-fee guess when available — see predict.predict_budget_cost().
         "spot_names": selected_spots,
     })
-except Exception:
+if False:
     preview_cost = None
 
 preview_crowd = None
-try:
+if False:
     preview_crowd = api_post("/predict/crowd", {
         "spot_name": selected_spot, "district": selected_district, "category": category,
         "year": start_date.year, "month": start_date.strftime("%B"), "season": season, "festival": festival,
     })
-except Exception:
+if False:
     preview_crowd = None
 
 preview_climate = None
-try:
+if False:
     preview_climate = api_post("/predict/climate", {"district": selected_district, "target_date": start_date.isoformat()})
-except Exception:
+if False:
     preview_climate = None
 
 # ---------------------------------------------------------------------------
