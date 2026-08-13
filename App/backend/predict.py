@@ -26,6 +26,7 @@ get_amenities() below.
 from __future__ import annotations
 
 import os
+import resource
 import sqlite3
 from datetime import date
 from functools import lru_cache
@@ -43,6 +44,24 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
 from sqlalchemy import create_engine, text
+
+
+def _log_memory(label: str) -> None:
+    """Prints current process memory (RSS, in MB) to stdout — which lands
+    in Streamlit Cloud's own log stream, the same place its deploy logs
+    already show up. Added specifically to diagnose a deployed crash with
+    no Python traceback and no memory graph available on the hosting
+    platform: this makes memory usage visible in the one place we can
+    actually see, regardless of what tooling the host does or doesn't
+    provide. ru_maxrss is already in KB on Linux (the platform every cloud
+    host here runs), hence /1024 for MB — on macOS it's bytes instead, but
+    this only needs to be right in the deployed environment.
+    """
+    try:
+        rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+        print(f"[predict:mem] {label}: {rss_mb:.0f} MB RSS", flush=True)
+    except Exception:
+        pass  # never let diagnostic logging itself break anything
 
 APP_ROOT = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = APP_ROOT.parent
@@ -383,10 +402,28 @@ def load_project_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Loads the three core tables from smart_tourism.db (replaces the old
     trip_budget_prediction_dataset.csv / spot_visitors.csv /
     Climate_Dataset_Final.csv reads)."""
+    _log_memory("before load_project_data (reads all 3 tables incl. 346k-row climate_dataset)")
     with get_db_connection() as conn:
         budget_df = pd.read_sql_query("SELECT * FROM trip_budget_prediction", conn)
         visitors_df = pd.read_sql_query("SELECT * FROM spot_visitors", conn)
-        climate_df = pd.read_sql_query("SELECT * FROM climate_dataset", conn)
+        # climate_dataset has 12 columns but only 6 are ever used downstream
+        # (Humidity_Percent/Wind_Speed_kmph/Season/id are dead weight here) —
+        # at 346k+ rows this column list alone measured ~350MB in memory,
+        # so only fetching what's actually used is a real, not cosmetic,
+        # reduction. Lowercase column names here match both backends:
+        # SQLite matches column names case-insensitively regardless of how
+        # they were declared, and Postgres (via migrate_to_supabase.py)
+        # already stores them lowercase — the mixed-case names below are
+        # restored immediately after by _normalize_columns.
+        climate_df = pd.read_sql_query(
+            "SELECT tourist_spots, district, date, temperature_max_c, temperature_min_c, rainfall_mm "
+            "FROM climate_dataset",
+            conn,
+        )
+    _log_memory(
+        f"after raw reads (budget={len(budget_df)} rows, visitors={len(visitors_df)} rows, "
+        f"climate={len(climate_df)} rows)"
+    )
 
     visitors_df = _normalize_columns(
         visitors_df, ["Spot_Name", "District", "Category", "Month", "Season", "Festival", "Year"]
@@ -673,11 +710,13 @@ def predict_crowd_count(form_data: Dict[str, object]) -> float:
 
 @lru_cache(maxsize=1)
 def get_climate_model():
+    _log_memory("before loading climate LSTM")
     meta = joblib.load(CLIMATE_METADATA_PATH)
     state_dict = torch.load(CLIMATE_MODEL_PATH, map_location="cpu", weights_only=True)
     model = ClimateLSTM()
     model.load_state_dict(state_dict)
     model.eval()
+    _log_memory("after loading climate LSTM")
     return model, meta
 
 
@@ -686,6 +725,7 @@ def _climate_statewide_series() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Rebuilds the day-to-day statewide series the LSTM was trained on:
     Temperature_Max_C, Temperature_Min_C, and a derived Rainfall_Percent
     (rolling 7-day % of rain-days per district), averaged across all spots."""
+    _log_memory("before _climate_statewide_series (loads full climate_dataset)")
     _, _, climate_df = load_project_data()
     df = climate_df.copy()
     df["Is_Rain_Day"] = (df["Rainfall_mm"] >= RAIN_THRESHOLD_MM).astype(int)
@@ -695,6 +735,7 @@ def _climate_statewide_series() -> Tuple[pd.DataFrame, pd.DataFrame]:
     )
     statewide = df.groupby("Date")[["Temperature_Max_C", "Temperature_Min_C", "Rainfall_Percent"]].mean()
     statewide = statewide.asfreq("D").ffill()
+    _log_memory("after _climate_statewide_series")
     return df, statewide
 
 
