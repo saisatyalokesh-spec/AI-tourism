@@ -26,7 +26,6 @@ get_amenities() below.
 from __future__ import annotations
 
 import os
-import resource
 import sqlite3
 from datetime import date
 from functools import lru_cache
@@ -45,6 +44,11 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
 from sqlalchemy import create_engine, text
 
+try:
+    import resource  # Unix-only; Streamlit Cloud provides it, Windows does not.
+except ImportError:  # pragma: no cover - platform dependent
+    resource = None
+
 
 def _log_memory(label: str) -> None:
     """Prints current process memory (RSS, in MB) to stdout — which lands
@@ -58,6 +62,8 @@ def _log_memory(label: str) -> None:
     this only needs to be right in the deployed environment.
     """
     try:
+        if resource is None:
+            return
         rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
         print(f"[predict:mem] {label}: {rss_mb:.0f} MB RSS", flush=True)
     except Exception:
@@ -132,13 +138,12 @@ def _other_spots_coordinates() -> Dict[str, Tuple[float, float]]:
 @lru_cache(maxsize=1)
 def get_spot_coordinates() -> Dict[str, Tuple[float, float]]:
     """One (lat, lon) per tourist spot. other_spots (real per-spot
-    coordinates) takes priority; climate_dataset fills in any spot only
-    present there (coordinates recorded per *district* in that table, so
-    only meaningful for cross-district comparisons)."""
-    _, _, climate_df = load_project_data()
+    coordinates) takes priority; compact climate spot metadata fills in any
+    spot only present there (its coordinates are district-level)."""
+    climate_spots = _climate_spot_metadata()
     coords = dict(_other_spots_coordinates())
     climate_coords = (
-        climate_df.dropna(subset=["Latitude", "Longitude"])
+        climate_spots.dropna(subset=["Latitude", "Longitude"])
         .drop_duplicates(subset=["Tourist Spots"])
         .set_index("Tourist Spots")[["Latitude", "Longitude"]]
     )
@@ -154,10 +159,11 @@ def get_spot_coordinate(spot_name: str) -> Tuple[float, float] | None:
 @lru_cache(maxsize=1)
 def get_spot_district_map() -> Dict[str, str]:
     """spot name -> district, combining the spot_visitors table (primary) and
-    the climate_dataset table (fallback for spots only present there)."""
-    budget_df, visitors_df, climate_df = load_project_data()
+    compact climate spot metadata (fallback for spots only present there)."""
+    _, visitors_df, _ = load_project_data()
+    climate_spots = _climate_spot_metadata()
     mapping = dict(zip(visitors_df["Spot_Name"], visitors_df["District"]))
-    for spot, district in zip(climate_df["Tourist Spots"], climate_df["District"]):
+    for spot, district in zip(climate_spots["Tourist Spots"], climate_spots["District"]):
         mapping.setdefault(spot, district)
     return mapping
 
@@ -402,7 +408,7 @@ def load_project_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Loads the three core tables from smart_tourism.db (replaces the old
     trip_budget_prediction_dataset.csv / spot_visitors.csv /
     Climate_Dataset_Final.csv reads)."""
-    _log_memory("before load_project_data (reads all 3 tables incl. 346k-row climate_dataset)")
+    _log_memory("before load_project_data (using SQL-aggregated daily climate data)")
     with get_db_connection() as conn:
         budget_df = pd.read_sql_query("SELECT * FROM trip_budget_prediction", conn)
         visitors_df = pd.read_sql_query("SELECT * FROM spot_visitors", conn)
@@ -416,13 +422,16 @@ def load_project_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         # already stores them lowercase — the mixed-case names below are
         # restored immediately after by _normalize_columns.
         climate_df = pd.read_sql_query(
-            "SELECT tourist_spots, district, date, temperature_max_c, temperature_min_c, rainfall_mm "
-            "FROM climate_dataset",
+            "SELECT district, date, "
+            "AVG(temperature_max_c) AS temperature_max_c, "
+            "AVG(temperature_min_c) AS temperature_min_c, "
+            "AVG(CASE WHEN rainfall_mm >= 1.0 THEN 1.0 ELSE 0.0 END) * 100.0 AS rainfall_percent "
+            "FROM climate_dataset GROUP BY district, date",
             conn,
         )
     _log_memory(
         f"after raw reads (budget={len(budget_df)} rows, visitors={len(visitors_df)} rows, "
-        f"climate={len(climate_df)} rows)"
+        f"daily_climate={len(climate_df)} rows)"
     )
 
     visitors_df = _normalize_columns(
@@ -431,15 +440,13 @@ def load_project_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     climate_df = _normalize_columns(
         climate_df,
         [
-            "Tourist_Spots", "District", "Date", "Latitude", "Longitude",
-            "Temperature_Max_C", "Temperature_Min_C", "Rainfall_mm",
+            "District", "Date", "Temperature_Max_C", "Temperature_Min_C", "Rainfall_Percent",
         ],
     )
 
     # The DB column is Tourist_Spots (underscore); the rest of this module
     # was written against the CSV's "Tourist Spots" (space) name, so it's
     # renamed once here rather than touching every call site below.
-    climate_df = climate_df.rename(columns={"Tourist_Spots": "Tourist Spots"})
 
     budget_df["season"] = budget_df["season"].astype(str)
     budget_df["transport_mode"] = budget_df["transport_mode"].astype(str)
@@ -452,11 +459,30 @@ def load_project_data() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     visitors_df["Season"] = visitors_df["Season"].astype(str)
     visitors_df["Festival"] = visitors_df["Festival"].fillna("None").astype(str)
 
-    climate_df["Tourist Spots"] = climate_df["Tourist Spots"].astype(str)
     climate_df["District"] = climate_df["District"].astype(str)
     climate_df["Date"] = pd.to_datetime(climate_df["Date"])
 
     return budget_df, visitors_df, climate_df
+
+
+@lru_cache(maxsize=1)
+def _climate_spot_metadata() -> pd.DataFrame:
+    """One metadata row per climate spot, used only as a map fallback.
+
+    This preserves spot/district/coordinate lookups without retaining every
+    historical climate reading in the Streamlit process.
+    """
+    with get_db_connection() as conn:
+        df = pd.read_sql_query(
+            "SELECT tourist_spots, district, latitude, longitude "
+            "FROM climate_dataset GROUP BY tourist_spots, district, latitude, longitude",
+            conn,
+        )
+    df = _normalize_columns(df, ["Tourist_Spots", "District", "Latitude", "Longitude"])
+    df = df.rename(columns={"Tourist_Spots": "Tourist Spots"})
+    df["Tourist Spots"] = df["Tourist Spots"].astype(str)
+    df["District"] = df["District"].astype(str)
+    return df
 
 
 @lru_cache(maxsize=1)
@@ -725,13 +751,12 @@ def _climate_statewide_series() -> Tuple[pd.DataFrame, pd.DataFrame]:
     """Rebuilds the day-to-day statewide series the LSTM was trained on:
     Temperature_Max_C, Temperature_Min_C, and a derived Rainfall_Percent
     (rolling 7-day % of rain-days per district), averaged across all spots."""
-    _log_memory("before _climate_statewide_series (loads full climate_dataset)")
+    _log_memory("before _climate_statewide_series (uses compact daily climate data)")
     _, _, climate_df = load_project_data()
     df = climate_df.copy()
-    df["Is_Rain_Day"] = (df["Rainfall_mm"] >= RAIN_THRESHOLD_MM).astype(int)
     df["Rainfall_Percent"] = (
-        df.groupby("District")["Is_Rain_Day"]
-          .transform(lambda s: s.rolling(7, min_periods=1).mean() * 100)
+        df.groupby("District")["Rainfall_Percent"]
+          .transform(lambda s: s.rolling(7, min_periods=1).mean())
     )
     statewide = df.groupby("Date")[["Temperature_Max_C", "Temperature_Min_C", "Rainfall_Percent"]].mean()
     statewide = statewide.asfreq("D").ffill()
