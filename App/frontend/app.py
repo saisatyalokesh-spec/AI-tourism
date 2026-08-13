@@ -1199,7 +1199,7 @@ if st.session_state.app_view == "modules":
              "role": "Serves every prediction and lookup endpoint (/predict/*, /spot-info, "
                      "/amenities, /distance/*) over HTTP."},
             {"icon": "🗄️", "color": ACCENT_SOFT, "name": "SQLite Database",
-             "role": "smart_tourism.db — holds spot/crowd/climate/cost history plus amenities and "
+             "role": "smart_tourism.db from Superbase — holds spot/crowd/climate/cost history plus amenities and "
                      "popularity, replacing the project's original CSV files."},
             {"icon": "🧮", "color": GOOD, "name": "scikit-learn Preprocessing",
              "role": "Ordinal/one-hot encoding and imputation pipelines that turn raw form inputs into the "
