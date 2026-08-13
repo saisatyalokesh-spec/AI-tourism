@@ -705,6 +705,16 @@ def _climate_statewide_series() -> Tuple[pd.DataFrame, pd.DataFrame]:
 # from whatever the last known date happened to look like.
 CLIMATE_BLEND_HORIZON_DAYS = 14
 
+# Hard ceiling on how far ahead the day-by-day LSTM walk will run. Each day
+# ahead is one full model pass in a plain Python loop with no early exit —
+# a date picked with no upper bound (e.g. years out) would mean thousands
+# of sequential forward passes on a single page load, which is slow enough
+# to look like — and on a resource-limited host, potentially cause — a
+# hung/crashed process rather than a clean error. The frontend's date
+# picker already limits this to a year out; this is the backend's own
+# floor under that, independent of any particular UI enforcing it.
+CLIMATE_FORECAST_MAX_DAYS_AHEAD = 400
+
 # A plain point forecast doesn't show its own uncertainty, so a confidence
 # band is added that widens with how far out the day is — a rough but
 # honest way to signal "less sure the further ahead this is", the same
@@ -773,6 +783,12 @@ def _climate_forecast_series(district: str, last_date: date) -> List[Dict[str, o
     days_ahead = (target_ts.normalize() - last_known_date.normalize()).days
     if days_ahead < 1:
         raise ValueError(f"Pick a travel date after {last_known_date.date()} — that's the latest date in the dataset.")
+    if days_ahead > CLIMATE_FORECAST_MAX_DAYS_AHEAD:
+        raise ValueError(
+            f"That date is {days_ahead} days ahead — this forecast walks forward one day at a time "
+            f"from the dataset's last known reading, so dates more than "
+            f"{CLIMATE_FORECAST_MAX_DAYS_AHEAD} days out aren't supported. Pick a nearer date."
+        )
 
     current_seq = torch.tensor(diffs.values[-seq_len:], dtype=torch.float32).unsqueeze(0)
     future_diffs = []

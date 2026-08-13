@@ -1759,8 +1759,14 @@ with st.container(border=True):
     # Row 2 — when & who: date, duration, travelers side by side.
     row2_c1, row2_c2, row2_c3 = st.columns(3)
     with row2_c1:
-        start_date = st.date_input("📅 Start Date", value=date.today(), min_value=date.today(),
-                                    key="trip_start_date")
+        start_date = st.date_input(
+            "📅 Start Date", value=date.today(), min_value=date.today(),
+            max_value=date.today() + timedelta(days=365),
+            key="trip_start_date",
+            help="Limited to a year out — the weather forecast is a real day-by-day model walk from "
+                 "today's data, not a lookup, so a date picked far enough away would mean thousands of "
+                 "forecasting steps for one page load.",
+        )
     with row2_c2:
         duration_days = st.number_input("🗓️ Duration (Days)", min_value=1, max_value=30, value=3,
                                          key="trip_duration_days")
