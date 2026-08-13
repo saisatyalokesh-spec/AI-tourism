@@ -1570,6 +1570,23 @@ if st.session_state.app_view == "results":
             "road route to your selected spot(s). Powered by Nominatim (geocoding) + OSRM (routing) + "
             "Folium (the map itself) — all free, open-source, no API key."
         )
+
+        # Gated behind a button on purpose: st.tabs() renders every tab's
+        # content on every script rerun (Streamlit just hides the inactive
+        # ones with CSS — it doesn't skip running them). Without this gate,
+        # every "Generate My Trip Plan" click was paying for a spot-coordinates
+        # lookup, an OSRM network round-trip, and a full Folium render even
+        # for people who never opened this tab — extra memory/network load
+        # that scales with how many spots are selected, right on top of an
+        # already-tall baseline (torch + xgboost + sklearn are ~700MB RSS
+        # before a single prediction runs). This keeps that cost opt-in.
+        map_loaded_key = f"nav_map_loaded::{'|'.join(selected_spots_for_map)}"
+        if not st.session_state.get(map_loaded_key):
+            if st.button("🗺️ Load Route Map", key="load_nav_map_btn", use_container_width=True):
+                st.session_state[map_loaded_key] = True
+                st.rerun()
+            st.stop()
+
         start_query = st.text_input(
             "📍 Your starting location", placeholder="e.g. Secunderabad Railway Station, Hyderabad",
             key="nav_map_start_location",
