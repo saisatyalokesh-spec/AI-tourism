@@ -23,6 +23,7 @@ import folium
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+import streamlit.components.v1 as st_components
 from streamlit_folium import st_folium
 
 # predict.py/schemas.py live in App/backend/; database/database.py (used
@@ -892,6 +893,34 @@ def estimate_travel_time(distance_km: float, mode: str) -> str:
 # ---------------------------------------------------------------------------
 if "app_view" not in st.session_state:
     st.session_state.app_view = "overview"
+
+
+def _scroll_to_top() -> None:
+    """st.markdown()'s unsafe_allow_html strips <script> tags outright, so
+    a JS scroll reset has to go through components.html() instead (it runs
+    inside a real iframe, and window.parent reaches back out to the actual
+    page). height=0 keeps it invisible — this renders nothing, it only runs
+    the script once."""
+    st_components.html(
+        """<script>
+            window.parent.document.querySelectorAll('section.main').forEach(
+                el => el.scrollTo({top: 0, behavior: 'instant'})
+            );
+        </script>""",
+        height=0,
+    )
+
+
+# Switching views (sidebar nav, "Generate My Trip Plan", "Edit Trip Details",
+# etc.) all just change app_view + st.rerun() — Streamlit itself never resets
+# scroll position on a rerun, so without this, clicking e.g. "Predictions &
+# Modules" while scrolled down on another page lands you on the new page
+# still scrolled down. Comparing against the last-seen view (rather than
+# scrolling on every rerun) keeps this from fighting normal in-page reruns,
+# like typing into the trip form.
+if st.session_state.get("_last_app_view") != st.session_state.app_view:
+    st.session_state["_last_app_view"] = st.session_state.app_view
+    _scroll_to_top()
 
 
 def render_table(headers: list[str], rows: list[list[str]]) -> None:
