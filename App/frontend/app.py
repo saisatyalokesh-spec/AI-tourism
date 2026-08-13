@@ -1,15 +1,21 @@
 """
-app.py — Streamlit frontend. Run from the frontend/ folder, with the backend
-already running (see backend/main.py):
+app.py — Streamlit frontend.
 
     streamlit run app.py
 
-Talks to the FastAPI backend over HTTP at BACKEND_URL below.
+Runs standalone: calls backend/predict.py directly in-process instead of
+over HTTP, so there's no separate FastAPI server to start or keep in sync.
+See the api_get()/api_post() functions below — they keep the exact call
+signatures the rest of this file already uses everywhere (api_get("/districts"),
+api_post("/predict/trip", payload), etc.), but now dispatch straight into
+predict.py instead of making a network request. Nothing past that point in
+this file needed to change.
 """
 
 from __future__ import annotations
 
 import json
+import sys
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -19,7 +25,28 @@ import requests
 import streamlit as st
 from streamlit_folium import st_folium
 
-BACKEND_URL = "uvicorn App.backend.main:app --host 0.0.0.0 --port $PORT"
+# predict.py/schemas.py live in App/backend/; database/database.py (used
+# only for trip-prediction logging) lives at the project root — mirrors
+# backend/main.py's own sys.path setup, for the same reason: this makes
+# both resolve correctly regardless of which directory Streamlit was
+# actually launched from.
+_FRONTEND_DIR = Path(__file__).resolve().parent           # .../App/frontend
+_BACKEND_DIR = _FRONTEND_DIR.parent / "backend"             # .../App/backend
+_PROJECT_ROOT = _FRONTEND_DIR.parent.parent                 # .../Tourism Project
+sys.path.insert(0, str(_BACKEND_DIR))
+sys.path.insert(0, str(_PROJECT_ROOT))
+
+import predict  # noqa: E402 (import must follow the sys.path setup above)
+
+try:
+    from database.database import log_prediction
+except Exception:
+    # Optional — logging predictions to Supabase/text-log is nice-to-have,
+    # not required for the app to function, so a broken/missing database/
+    # package here just silently disables logging rather than crashing.
+    def log_prediction(*args, **kwargs):
+        pass
+
 # Nominatim (OpenStreetMap's free geocoder) and OSRM's public demo routing
 # server — both free, no API key required. Nominatim's usage policy requires
 # a real identifying User-Agent on every request (unlabeled traffic gets
@@ -389,20 +416,209 @@ st.markdown(
 
 
 # ---------------------------------------------------------------------------
-# Backend helpers
+# In-process "backend" — api_get()/api_post() keep the exact call
+# signatures used everywhere below (api_get("/districts"),
+# api_post("/predict/trip", payload), etc.), but each path now dispatches
+# straight into predict.py instead of making an HTTP request. This mirrors
+# exactly what backend/main.py's route handlers used to do — including the
+# extra shaping/logging each one did beyond a bare predict.py call (e.g.
+# /spot-info logs an interaction, /predict/trip composes 3 models plus
+# packing tips and logs the whole trip) — just without FastAPI or a
+# second process in between.
 # ---------------------------------------------------------------------------
+def _festival_for_date(target_date: date) -> dict:
+    """Which real festival (if any) target_date falls inside — a reverse
+    lookup (date -> festival) that backend/main.py never actually exposed
+    as an endpoint (the frontend called a nonexistent /festival-for-date
+    before this change, silently failing every time). Reimplemented here
+    from the same primitive predict.py already uses elsewhere for this
+    exact check: predict._festival_is_active()."""
+    for festival_name in predict.FESTIVAL_TYPICAL_MONTH:
+        if predict._festival_is_active(festival_name, target_date):
+            known = predict.FESTIVAL_DATES.get(target_date.year, {}).get(festival_name, ())
+            is_month_level_estimate = target_date not in known
+            return {"festival": festival_name, "is_month_level_estimate": is_month_level_estimate}
+    return {"festival": "None", "is_month_level_estimate": False}
+
+
+def _predict_trip(payload: dict) -> dict:
+    """Same combined cost + crowd + climate logic backend/main.py's
+    /predict/trip route used to run server-side, called directly here."""
+    target_date = date.fromisoformat(payload["target_date"])
+    end_date_val = date.fromisoformat(payload["end_date"]) if payload.get("end_date") else target_date
+
+    cost = predict.predict_budget_cost({
+        "duration_days": payload["duration_days"], "num_travelers": payload["num_travelers"],
+        "route_distance_km": payload["route_distance_km"], "transport_mode": payload["transport_mode"],
+        "accommodation_tier": payload["accommodation_tier"], "season": payload["season"],
+        "spot_names": payload.get("spot_names"),
+    })
+
+    crowd_input = {
+        "spot_name": payload["spot_name"], "district": payload["district"], "category": payload["category"],
+        "year": target_date.year, "month": target_date.strftime("%B"),
+        "season": payload["season"], "festival": payload["festival"],
+    }
+    crowd_visitors = predict.predict_crowd_count(crowd_input)
+    festival_active = predict._festival_is_active(payload["festival"], target_date)
+    crowd = {
+        "predicted_visitors": crowd_visitors,
+        "crowd_level": predict.crowd_level_label(crowd_visitors, festival_active),
+    }
+
+    climate_error = None
+    climate = None
+    climate_forecast_error = None
+    climate_forecast = None
+    try:
+        climate = predict.predict_climate(payload["district"], target_date)
+    except Exception as e:
+        climate_error = str(e)
+    try:
+        climate_forecast = predict.predict_climate_forecast(payload["district"], target_date, end_date_val)
+    except Exception as e:
+        climate_forecast_error = str(e)
+
+    # Combined "good time to visit" badge — needs both crowd and climate,
+    # so only computed when climate succeeded.
+    visit_rating = None
+    if climate is not None:
+        visit_rating = predict.combined_visit_rating(
+            crowd["crowd_level"], climate["rain_chance_percent"], climate["predicted_max_temp"]
+        )
+
+    # Packing tips from the whole trip window's forecast (falls back to the
+    # single-day climate result if the multi-day forecast wasn't available).
+    packing_tips = []
+    if climate_forecast and climate_forecast.get("days"):
+        packing_tips = predict.generate_trip_packing_tips(climate_forecast["days"])
+    elif climate is not None:
+        packing_tips = predict.generate_packing_tips(
+            climate["rain_chance_percent"], climate["predicted_max_temp"], climate["predicted_min_temp"]
+        )
+
+    spot_info = predict.get_spot_rating_popularity(payload["spot_name"])
+    upcoming_festivals = predict.get_upcoming_festivals(
+        payload["spot_name"], payload["district"], payload["category"], target_date
+    )
+
+    result = {
+        "cost": cost, "crowd": crowd,
+        "climate": climate, "climate_error": climate_error,
+        "climate_forecast": climate_forecast, "climate_forecast_error": climate_forecast_error,
+        "spot_info": spot_info,
+        "visit_rating": visit_rating,
+        "packing_tips": packing_tips,
+        "upcoming_festivals": upcoming_festivals,
+    }
+    try:
+        log_prediction("trip", payload["district"], payload["spot_name"], payload, result)
+        predict.log_interaction(payload["spot_name"], "predict_trip")
+    except Exception:
+        pass  # logging must never break a prediction that already succeeded
+    return result
+
+
 def api_get(path: str, params: dict | None = None):
-    r = requests.get(f"{BACKEND_URL}{path}", params=params, timeout=30)
-    r.raise_for_status()
-    return r.json()
+    params = params or {}
+
+    if path == "/districts":
+        return predict.get_districts()
+
+    if path == "/options":
+        return predict.get_cost_input_options()
+
+    if path == "/spots":
+        district = params.get("district")
+        category = params.get("category")
+        if district:
+            return predict.get_spots_by_district(district, category)
+        return predict.get_all_spots()
+
+    if path == "/transport-suggestions":
+        return predict.suggest_transport_modes(int(params["num_travelers"]))
+
+    if path == "/festival-for-date":
+        return _festival_for_date(date.fromisoformat(params["target_date"]))
+
+    if path.startswith("/amenities/"):
+        spot_name = path.removeprefix("/amenities/")
+        items = predict.get_amenities(spot_name)
+        return {"spot_name": spot_name, "amenities": items, "available": len(items) > 0}
+
+    if path.startswith("/spot-info/"):
+        spot_name = path.removeprefix("/spot-info/")
+        predict.log_interaction(spot_name, "view_spot_info")
+        return predict.get_spot_rating_popularity(spot_name)
+
+    if path.startswith("/festival-date/"):
+        festival = path.removeprefix("/festival-date/")
+        from_date_str = params.get("from_date")
+        ref_date = date.fromisoformat(from_date_str) if from_date_str else date.today()
+        try:
+            result = predict.get_next_festival_date(festival, ref_date)
+        except KeyError as e:
+            raise RuntimeError(str(e))
+        return {
+            "festival": result["festival"],
+            "date": result["date"].isoformat(),
+            "date_is_estimate": result["date_is_estimate"],
+        }
+
+    raise RuntimeError(f"Unknown local endpoint: {path}")
 
 
 def api_post(path: str, payload: dict):
-    r = requests.post(f"{BACKEND_URL}{path}", json=payload, timeout=120)
-    if not r.ok:
-        detail = r.json().get("detail", r.text) if r.headers.get("content-type", "").startswith("application/json") else r.text
-        raise RuntimeError(detail)
-    return r.json()
+    if path == "/spot-coordinates":
+        coords = []
+        for spot_name in payload["spots"]:
+            c = predict.get_spot_coordinate(spot_name)
+            if c is None:
+                coords.append({"spot_name": spot_name, "available": False, "lat": None, "lon": None})
+            else:
+                coords.append({"spot_name": spot_name, "available": True, "lat": c[0], "lon": c[1]})
+        return {"coordinates": coords}
+
+    if path == "/distance/chain":
+        spots = payload["spots"]
+        if len(spots) < 2:
+            raise RuntimeError("Provide at least two spots to compute distances between them.")
+        return predict.compute_chain_distances(spots)
+
+    if path == "/distance/optimize":
+        spots = payload["spots"]
+        if len(spots) < 2:
+            raise RuntimeError("Provide at least two spots to suggest a visiting order.")
+        return predict.suggest_visit_order(spots)
+
+    if path == "/predict/cost":
+        try:
+            return predict.predict_budget_cost(payload)
+        except Exception as e:
+            raise RuntimeError(str(e))
+
+    if path == "/predict/crowd":
+        try:
+            visitors = predict.predict_crowd_count(payload)
+            festival_active = str(payload.get("festival", "None")) != "None"
+            return {
+                "predicted_visitors": visitors,
+                "crowd_level": predict.crowd_level_label(visitors, festival_active),
+            }
+        except Exception as e:
+            raise RuntimeError(str(e))
+
+    if path == "/predict/climate":
+        try:
+            target_date = date.fromisoformat(payload["target_date"])
+            return predict.predict_climate(payload["district"], target_date)
+        except Exception as e:
+            raise RuntimeError(str(e))
+
+    if path == "/predict/trip":
+        return _predict_trip(payload)
+
+    raise RuntimeError(f"Unknown local endpoint: {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -1434,10 +1650,10 @@ if st.session_state.app_view == "results":
 # ===========================================================================
 try:
     districts = api_get("/districts")
-except Exception:
+except Exception as e:
     st.error(
-        f"Can't reach the backend at **{BACKEND_URL}**. Start it first:\n\n"
-        f"```\ncd backend\nuvicorn main:app --reload\n```"
+        f"Couldn't load trip data: {e}\n\n"
+        f"Check that App/pickles/ and App/data/smart_tourism.db are present."
     )
     st.stop()
 
