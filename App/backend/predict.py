@@ -43,6 +43,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, OrdinalEncoder, StandardScaler
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 
 try:
     import resource  # Unix-only; Streamlit Cloud provides it, Windows does not.
@@ -84,7 +85,14 @@ SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL")
 # Postgres instead of the local smart_tourism.db file. Falls back to the
 # local SQLite file automatically if the variable isn't set, so the app
 # still works with zero setup.
-_engine = create_engine(SUPABASE_DB_URL, pool_pre_ping=True) if SUPABASE_DB_URL else None
+if SUPABASE_DB_URL:
+    _db_url = make_url(SUPABASE_DB_URL)
+    if _db_url.drivername in {"postgres", "postgresql"}:
+        # Select the DBAPI installed by requirements instead of SQLAlchemy's default.
+        _db_url = _db_url.set(drivername="postgresql+psycopg2")
+    _engine = create_engine(_db_url, pool_pre_ping=True)
+else:
+    _engine = None
 
 BUDGET_MODEL_PATH = PICKLES_DIR / "best_trip_cost_model.pkl"
 CROWD_MODEL_PATH = PICKLES_DIR / "best_model.pkl"
