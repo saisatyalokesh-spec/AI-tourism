@@ -9,6 +9,10 @@ This README follows the same structure as the app itself: **Project
 Overview** first, then **Predictions & Modules**, then how to set it up
 and run it.
 
+## 🚀 Live application
+
+Try the app here: [Smart Tourism Telangana](https://ai-tourism-mfmksyshbia3kwkezhmt3u.streamlit.app/)
+
 ---
 
 ## 1. 📋 Project Overview
